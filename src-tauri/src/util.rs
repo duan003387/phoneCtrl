@@ -80,3 +80,53 @@ pub fn downloads_dir() -> Result<std::path::PathBuf, std::io::Error> {
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
+
+/// Tauri 资源目录（macOS 打包后为 Contents/Resources）。在 run() 的 setup 里设置一次。
+static RESOURCE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_resource_dir(p: std::path::PathBuf) {
+    let _ = RESOURCE_DIR.set(p);
+}
+
+/// 解析随 app 分发的资源文件（相对 resources 根，可含子目录如 `adb/adb`）。
+/// 依次尝试：dev 的 CARGO_MANIFEST_DIR/resources → Tauri resource_dir（打包目录）
+/// → 可执行文件同级。返回存在的第一个。
+pub fn resolve_resource(rel: &str) -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let p = std::path::PathBuf::from(dir).join("resources").join(rel);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Some(rd) = RESOURCE_DIR.get() {
+        let p = rd.join(rel);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let p = parent.join(rel);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// 确保可执行文件带执行位（打包/解压可能丢失权限）。仅 unix 生效。
+#[cfg(unix)]
+pub fn ensure_executable(path: &std::path::Path) {
+    if let Ok(md) = std::fs::metadata(path) {
+        let mut perms = md.permissions();
+        use std::os::unix::fs::PermissionsExt;
+        if perms.mode() & 0o111 == 0 {
+            perms.set_mode(perms.mode() | 0o755);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn ensure_executable(_path: &std::path::Path) {}

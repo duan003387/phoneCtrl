@@ -101,9 +101,11 @@ export class H264Player {
   private running = false;
   public onStats?: (fps: number, width: number, height: number) => void;
   public onFirstFrame?: () => void;
+  public onRequestKeyframe?: () => void;
   private firstFrameFired = false;
   private frameCount = 0;
   private lastStatsAt = performance.now();
+  private kfTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(canvas: HTMLCanvasElement, url: string) {
     this.canvas = canvas;
@@ -116,10 +118,18 @@ export class H264Player {
   start() {
     this.running = true;
     void this.loop();
+    // 出画前定时请求关键帧：覆盖切标签回来、错过 IDR、解码器重置等情形。
+    this.kfTimer = setInterval(() => {
+      if (!this.firstFrameFired) this.onRequestKeyframe?.();
+    }, 1000);
   }
 
   stop() {
     this.running = false;
+    if (this.kfTimer) {
+      clearInterval(this.kfTimer);
+      this.kfTimer = null;
+    }
     this.abort?.abort();
     try {
       this.decoder?.close();
@@ -231,6 +241,8 @@ export class H264Player {
         const resp = await fetch(this.url, { signal: this.abort.signal });
         if (!resp.body) throw new Error("无响应体");
         const reader = resp.body.getReader();
+        // 连接建立即请求关键帧，尽快产出可解码的 IDR。
+        this.onRequestKeyframe?.();
         let buf = new Uint8Array(0);
         for (;;) {
           const { value, done } = await reader.read();

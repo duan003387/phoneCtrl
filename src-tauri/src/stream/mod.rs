@@ -72,6 +72,9 @@ pub struct StreamHandle {
     pub touch_adb: std::sync::atomic::AtomicBool,
     /// sendevent 注入桥是否就绪（启动时收到 BRIDGE_READY 即置真，作为触摸首选通道）
     pub bridge_ok: std::sync::atomic::AtomicBool,
+    /// 流是否就绪（初始视频流头读取完成、读线程已启动）。仅在此为真后才允许
+    /// 响应前端的 RESET_VIDEO 关键帧请求，避免与启动期协商竞争。
+    pub ready: std::sync::atomic::AtomicBool,
     /// 注入桥 stdin（写入事件）与进程句柄
     pub bridge_stdin: std::sync::Mutex<Option<std::process::ChildStdin>>,
     pub bridge_child: std::sync::Mutex<Option<std::process::Child>>,
@@ -292,6 +295,7 @@ pub async fn stream_start(
         keyguard: std::sync::atomic::AtomicBool::new(false),
         touch_adb: std::sync::atomic::AtomicBool::new(false),
         bridge_ok: std::sync::atomic::AtomicBool::new(false),
+        ready: std::sync::atomic::AtomicBool::new(false),
         bridge_stdin: std::sync::Mutex::new(None),
         bridge_child: std::sync::Mutex::new(None),
     });
@@ -390,12 +394,16 @@ async fn run_pipeline(
     hub: Arc<H264Hub>,
 ) {
     let mut backoff_ms: u64 = 500;
+    let mut fails: u32 = 0;
     emit(&app, &serial, "streaming", None);
 
     loop {
         if *stop_rx.borrow() {
             break;
         }
+        // 每轮开始先置为未就绪：本轮成功读到流头后再置真，
+        // 确保 RESET_VIDEO 不会在启动协商期打断读头。
+        handle.ready.store(false, std::sync::atomic::Ordering::Relaxed);
 
         // 每次（含首次）先清理设备上残留的旧 scrcpy 服务器进程。
         // 旧进程会占住 abstract socket 导致新服务器绑定失败（Address already in use），
@@ -420,9 +428,16 @@ async fn run_pipeline(
         {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[phonectrl] spawn scrcpy 失败: {e}");
-                emit(&app, &serial, "error", Some(e.to_string()));
-                break;
+                fails += 1;
+                eprintln!("[phonectrl] spawn scrcpy 失败({fails}): {e}");
+                if fails > 4 {
+                    emit(&app, &serial, "error", Some(e.to_string()));
+                    break;
+                }
+                emit(&app, &serial, "restarting", None);
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(2000);
+                continue;
             }
         };
         eprintln!(
@@ -439,11 +454,18 @@ async fn run_pipeline(
                 size
             }
             Err(e) => {
-                eprintln!("[phonectrl] 读取视频流元数据失败: {e}");
-                emit(&app, &serial, "error", Some(e.to_string()));
+                fails += 1;
+                eprintln!("[phonectrl] 读取视频流元数据失败({fails}): {e}");
                 let _ = producer.adb_child.kill();
                 let _ = producer.adb_child.wait();
-                break;
+                if fails > 4 {
+                    emit(&app, &serial, "error", Some(e.to_string()));
+                    break;
+                }
+                emit(&app, &serial, "restarting", None);
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(2000);
+                continue;
             }
         };
         if real_size != (width, height) {
@@ -458,6 +480,10 @@ async fn run_pipeline(
             "[phonectrl] producer 就绪 video_port={} control_port={}",
             producer.video_port, producer.control_port
         );
+        fails = 0;
+        backoff_ms = 500;
+        // 流头已读到、读线程即将启动：此后允许前端请求 RESET_VIDEO 关键帧。
+        handle.ready.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut producer_adb = producer.adb_child;
         let video_port = producer.video_port;
 
@@ -583,27 +609,12 @@ fn control_slot_port(serial: &str) -> u16 {
 
 /// 本地捆绑的 scrcpy-server jar 路径。
 fn server_jar_path() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let p = PathBuf::from(dir).join("resources/scrcpy-server-v4.0.jar");
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    // 打包构建：资源位于可执行文件同级目录
-    let p = std::env::current_exe().ok()?.parent()?.join("scrcpy-server-v4.0.jar");
-    p.exists().then_some(p)
+    crate::util::resolve_resource("scrcpy-server-v4.0.jar")
 }
 
 /// 本地捆绑的注入桥 jar 路径。
 fn bridge_jar_path() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let p = PathBuf::from(dir).join("resources/inputbridge.jar");
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    let p = std::env::current_exe().ok()?.parent()?.join("inputbridge.jar");
-    p.exists().then_some(p)
+    crate::util::resolve_resource("inputbridge.jar")
 }
 
 async fn spawn_scrcpy(

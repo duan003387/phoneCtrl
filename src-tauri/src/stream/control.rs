@@ -6,6 +6,7 @@ const TYPE_INJECT_KEYCODE: u8 = 0;
 const TYPE_INJECT_TEXT: u8 = 1;
 const TYPE_INJECT_TOUCH_EVENT: u8 = 2;
 const TYPE_SET_CLIPBOARD: u8 = 9;
+const TYPE_RESET_VIDEO: u8 = 17; // 请求编码器刷新，立即产出一个配置包+IDR 关键帧
 
 pub const ACTION_DOWN: u8 = 0;
 pub const ACTION_UP: u8 = 1;
@@ -100,6 +101,12 @@ impl ControlClient {
         buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
         buf.extend_from_slice(bytes);
         self.write_all(&buf).await
+    }
+
+    /// 请求设备编码器刷新，立即产出一个新的配置包 + IDR 关键帧。
+    /// 用于新客户端（重）连接或解码器重置后，让其能马上拿到可起步的关键帧。
+    pub async fn reset_video(&mut self) -> AppResult<()> {
+        self.write_all(&[TYPE_RESET_VIDEO]).await
     }
 
     async fn write_all(&mut self, buf: &[u8]) -> AppResult<()> {

@@ -1,10 +1,11 @@
 import { useCallback } from "react";
 import { save as macroSave } from "../api/macros";
-import { ControlOverlay } from "./ControlOverlay";
 import { MirrorCanvas } from "./MirrorCanvas";
+import { promptText } from "../ui/dialogs";
 import type { DeviceProps } from "../types";
 import type { StreamSession } from "../hooks/useStream";
 import type { MacroRecorder } from "../hooks/useMacroRecorder";
+import { IconPlay, IconStop, IconMacro } from "./Icons";
 
 interface Props {
   serial: string;
@@ -18,63 +19,79 @@ export function MirrorTab({ serial, deviceProps, stream, recorder, notify }: Pro
   const finishRecording = useCallback(async () => {
     const steps = recorder.finish();
     if (steps.length === 0) {
-      notify("未录制到任何动作", "err");
+      notify("未录制到任何动作（请在画面上点击/滑动后再保存）", "err");
       return;
     }
-    const name = window.prompt("宏名称", `宏 ${new Date().toLocaleTimeString()}`);
+    const name = await promptText("宏名称", `宏 ${new Date().toLocaleTimeString()}`, "宏名称");
     if (!name) return;
     try {
       const screenSize: [number, number] | null = deviceProps
         ? [deviceProps.screenWidth, deviceProps.screenHeight]
         : null;
       await macroSave(name, steps, screenSize);
-      notify(`宏「${name}」已保存（${steps.length} 个动作）`, "ok");
+      notify(`宏「${name}」已保存（${steps.length} 个动作），见「宏」页`, "ok");
     } catch (e) {
       notify(String(e), "err");
     }
   }, [recorder, deviceProps, notify]);
 
+  const isStreaming = stream.state === "streaming";
+
   return (
-    <div className="mirror-tab">
-      <div className="toolbar">
-        {stream.state === "idle" || stream.state === "error" ? (
-          <button className="btn primary" onClick={() => void stream.start()}>
-            开始投屏
-          </button>
-        ) : (
-          <button className="btn" onClick={() => void stream.stop()}>
-            停止投屏
-          </button>
-        )}
-        {recorder.recording ? (
-          <button className="btn warn" onClick={() => void finishRecording()}>
-            停止录制并保存
-          </button>
-        ) : (
-          <button
-            className="btn"
-            disabled={!stream.meta}
-            onClick={recorder.start}
-            title="录制后需在「宏」页回放"
-          >
-            ● 录制宏
-          </button>
-        )}
-        <span className="toolbar-status">
-          {stream.meta && (
-            <>
-              流分辨率 {stream.meta.width}×{stream.meta.height} @ {stream.meta.fps}fps
-              {stream.meta.backend === "scrcpy" && "（scrcpy 模式）"}
-              {deviceProps && ` · 设备 ${deviceProps.screenWidth}×${deviceProps.screenHeight}`}
-            </>
+    <div className="mirror-stage-container">
+      {/* 顶部独立工具栏（标准流占位，绝对不覆盖手机画面） */}
+      <div className="mirror-header-bar">
+        <div className="mirror-header-left">
+          {stream.state === "idle" || stream.state === "error" ? (
+            <button className="btn primary mini" onClick={() => void stream.start()}>
+              <IconPlay size={13} />
+              <span>开始投屏</span>
+            </button>
+          ) : (
+            <button className="btn mini" onClick={() => void stream.stop()}>
+              <IconStop size={13} />
+              <span>停止投屏</span>
+            </button>
           )}
-        </span>
+
+          {recorder.recording ? (
+            <button className="btn warn mini" onClick={() => void finishRecording()}>
+              <IconStop size={13} />
+              <span>保存宏</span>
+            </button>
+          ) : (
+            <button
+              className="btn mini"
+              disabled={!isStreaming}
+              onClick={recorder.start}
+              title="录制动作序列"
+            >
+              <IconMacro size={13} />
+              <span>录制宏</span>
+            </button>
+          )}
+        </div>
+
+        <div className="mirror-header-right">
+          {stream.meta ? (
+            <div className="stream-info-pills">
+              <span className="pill-tag">
+                {stream.meta.width}×{stream.meta.height}
+              </span>
+              <span className="pill-tag">{stream.meta.fps} FPS</span>
+              <span className="pill-tag">
+                {stream.meta.backend === "scrcpy" ? "scrcpy 协议" : "adb 模式"}
+              </span>
+            </div>
+          ) : (
+            <span className="pill-tag">等待投屏</span>
+          )}
+        </div>
       </div>
-      <div className="mirror-stage">
+
+      {/* 手机画面区域：自适应剩余全部高度，与顶部操作栏完全隔离无遮挡 */}
+      <div className="mirror-canvas-container">
         <MirrorCanvas serial={serial} stream={stream} recorder={recorder} />
-        {stream.meta && (
-          <ControlOverlay serial={serial} stream={stream} recorder={recorder} notify={notify} />
-        )}
       </div>
     </div>
   );

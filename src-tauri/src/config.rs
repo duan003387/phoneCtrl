@@ -70,6 +70,12 @@ pub fn detect_adb(configured: Option<&str>) -> AppResult<PathBuf> {
         return Err(AppError::Config(format!("配置的 adb 路径不存在: {p}")));
     }
 
+    // 优先使用随 app 打包的 adb（保证分发给他人后开箱即用，无需自装 SDK）。
+    if let Some(pb) = crate::util::resolve_resource(&format!("adb/{}", adb_exe())) {
+        crate::util::ensure_executable(&pb);
+        return Ok(pb);
+    }
+
     // 环境变量 ANDROID_HOME / ANDROID_SDK_ROOT
     for var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
         if let Ok(home) = std::env::var(var) {

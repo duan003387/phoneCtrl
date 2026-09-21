@@ -16,6 +16,10 @@ pub fn run() {
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;
+            // 记录资源目录（打包后为 Contents/Resources），供 adb / jar 资源解析。
+            if let Ok(rd) = app.path().resource_dir() {
+                util::set_resource_dir(rd);
+            }
             app.manage(tauri::async_runtime::block_on(AppState::new(config_dir)));
             Ok(())
         })
@@ -32,6 +36,7 @@ pub fn run() {
             commands::stream_start,
             commands::stream_stop,
             commands::stream_status,
+            commands::stream_request_keyframe,
             // 输入
             commands::input_tap,
             commands::input_swipe,

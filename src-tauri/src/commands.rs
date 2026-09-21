@@ -82,6 +82,24 @@ pub async fn stream_status(state: State<'_, AppState>, serial: String) -> AppRes
     stream::stream_status(&state, &serial).await
 }
 
+/// 请求设备立即产出一个新关键帧（用于前端（重）连接或解码器重置后快速恢复画面）。
+#[tauri::command]
+pub async fn stream_request_keyframe(state: State<'_, AppState>, serial: String) -> AppResult<()> {
+    let streams = state.streams.lock().await;
+    if let Some(h) = streams.get(&serial) {
+        // 仅在流已就绪（初始流头读取完成、读线程已启动）后发送，
+        // 避免 RESET_VIDEO 打断启动期的编码器/流头协商。
+        if !h.ready.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut guard = h.control.0.lock().await;
+        if let Some(c) = guard.as_mut() {
+            c.reset_video().await?;
+        }
+    }
+    Ok(())
+}
+
 // ────────────────────────── 输入控制 ──────────────────────────
 
 use crate::stream::{ACTION_DOWN, ACTION_MOVE, ACTION_UP};

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { touch, key, text } from "../api/input";
+import { requestKeyframe } from "../api/stream";
 import { KEYMAP } from "../keymap";
 import { H264Player } from "../h264player";
 import type { StreamSession } from "../hooks/useStream";
 import type { MacroRecorder } from "../hooks/useMacroRecorder";
+import { IconMirror } from "./Icons";
 
 interface Props {
   serial: string;
@@ -29,12 +31,13 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
     try {
       player = new H264Player(canvas, url);
       player.onFirstFrame = () => setPainted(true);
+      player.onRequestKeyframe = () => void requestKeyframe(serial);
       player.start();
     } catch (e) {
       console.error("[h264] 播放器初始化失败", e);
     }
     return () => player?.stop();
-  }, [stream.meta?.streamUrl, stream.state]);
+  }, [stream.meta?.streamUrl, stream.state, serial]);
 
   const gesture = useRef<{
     startX: number;
@@ -172,7 +175,7 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
     <div className="mirror-wrap">
       {recorder.recording && (
         <div className="rec-badge">
-          ● 录制中 {Math.round(recorder.elapsed / 1000)}s
+          ● 宏录制中 {Math.round(recorder.elapsed / 1000)}s
         </div>
       )}
       <div
@@ -194,10 +197,13 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
         )}
         {showPlaceholder && (
           <div className="mirror-placeholder">
-            {stream.state === "starting" && "正在启动投屏…"}
-            {stream.state === "streaming" && !painted && "正在建立画面…"}
-            {stream.state === "idle" && "点击「开始投屏」查看设备画面"}
-            {stream.state === "error" && <span className="err-text">投屏失败：{stream.error}</span>}
+            <IconMirror size={42} style={{ opacity: 0.4 }} />
+            {stream.state === "starting" && <span>正在启动 H.264 视频流…</span>}
+            {stream.state === "streaming" && !painted && <span>正在解码建立首帧画面…</span>}
+            {stream.state === "idle" && <span>点击左上方「开始投屏」连接设备屏幕</span>}
+            {stream.state === "error" && (
+              <span className="err-text">投屏启动异常：{stream.error}</span>
+            )}
           </div>
         )}
       </div>
