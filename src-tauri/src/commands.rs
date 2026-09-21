@@ -122,6 +122,12 @@ fn bridge_touch(
     Ok(())
 }
 
+/// 是否允许使用 scrcpy 控制通道注入输入。默认 auto 模式跳过（部分机型静默丢弃且
+/// 无法可靠探测），仅当用户显式选择 `touchBackend="scrcpy"` 时启用。
+async fn scrcpy_input_enabled(state: &AppState) -> bool {
+    state.config.read().await.touch_backend == "scrcpy"
+}
+
 /// 通过 scrcpy 控制通道发送触摸事件序列；返回是否已处理（否则回退 adb）。
 /// 注意：坐标必须使用视频流坐标系（0..流宽, 0..流高），screenSize 必须等于
 /// 服务器当前视频尺寸（取自服务器 session meta，含编码器对齐），
@@ -132,6 +138,9 @@ async fn touch_via_socket(
     serial: &str,
     events: &[(u8, u32, u32)],
 ) -> AppResult<bool> {
+    if !scrcpy_input_enabled(state).await {
+        return Ok(false);
+    }
     let streams = state.streams.lock().await;
     if let Some(h) = streams.get(serial) {
         // 锁屏显示期间，One UI 等锁屏会忽略经虚拟显示器转发的触摸事件，
@@ -160,6 +169,9 @@ async fn touch_via_socket(
 }
 
 async fn key_via_socket(state: &AppState, serial: &str, keycode: u16) -> AppResult<bool> {
+    if !scrcpy_input_enabled(state).await {
+        return Ok(false);
+    }
     let streams = state.streams.lock().await;
     if let Some(h) = streams.get(serial) {
         // scrcpy 通道可用（未确认失效）且未锁屏：走 scrcpy 按键；
@@ -178,6 +190,9 @@ async fn key_via_socket(state: &AppState, serial: &str, keycode: u16) -> AppResu
 }
 
 async fn text_via_socket(state: &AppState, serial: &str, text: &str) -> AppResult<bool> {
+    if !scrcpy_input_enabled(state).await {
+        return Ok(false);
+    }
     let streams = state.streams.lock().await;
     if let Some(h) = streams.get(serial) {
         if h.keyguard.load(std::sync::atomic::Ordering::Relaxed)
@@ -273,12 +288,11 @@ pub async fn input_text(state: State<'_, AppState>, serial: String, text: String
 
 /// 实时触摸事件（down/move/up），前端拖拽用。
 ///
-/// 注入通道优先级（sendevent 桥在启动时已通过 BRIDGE_READY 确认，无需运行时探测）：
-///   1. sendevent 注入桥 —— 直写内核 input 设备，实时、可靠，含锁屏；绕开被
-///      三星 One UI 8 等机型丢弃的框架层注入。
-///   2. scrcpy 控制通道 —— 桥不可用时使用（延迟也不高）；首个手势探测其有效性，
-///      若该机丢弃 scrcpy 注入则标记失效。
-///   3. 逐手势 adb —— 前两者都不可用时的最终回退（`input swipe/tap`，最慢但最通用）。
+/// 注入通道（不再依赖不可靠的帧变化自动探测）：
+///   1. sendevent 注入桥 —— 若启动时确认就绪（BRIDGE_READY），直写内核，实时可靠。
+///   2. scrcpy 控制通道 —— 仅当设置里显式选择 `touchBackend="scrcpy"` 时启用（低延迟，
+///      但华为/三星部分机型会静默丢弃，故不作为默认）。
+///   3. adb `input tap/swipe` —— auto 模式下桥不可用时的默认路径，最通用一定能用。
 #[tauri::command]
 pub async fn input_touch(
     state: State<'_, AppState>,
@@ -294,12 +308,12 @@ pub async fn input_touch(
         _ => return Err(AppError::Device(format!("未知触摸动作: {action}"))),
     };
 
+    let scrcpy_backend = state.config.read().await.touch_backend == "scrcpy";
     let streams = state.streams.lock().await;
     let Some(h) = streams.get(&serial) else {
         return Ok(());
     };
     let keyguard = h.keyguard.load(std::sync::atomic::Ordering::Relaxed);
-    let scrcpy_dead = h.touch_adb.load(std::sync::atomic::Ordering::Relaxed);
     let bridge_ok = h.bridge_ok.load(std::sync::atomic::Ordering::Relaxed);
 
     // ── 通道 1：sendevent 注入桥（首选，实时转发每个事件，锁屏亦可） ──
@@ -314,8 +328,8 @@ pub async fn input_touch(
         }
     }
 
-    // ── 通道 2：scrcpy 控制通道（桥不可用时；带首手势探测） ──
-    if !keyguard && !scrcpy_dead {
+    // ── 通道 2：scrcpy 控制通道（仅 scrcpy 后端模式；锁屏期间不用虚拟屏注入） ──
+    if scrcpy_backend && !keyguard {
         let mut guard = h.control.0.lock().await;
         if let Some(c) = guard.as_mut() {
             let (sw, sh) = {
@@ -323,64 +337,6 @@ pub async fn input_touch(
                 (m.width as u16, m.height as u16)
             };
             c.touch(action_id, x, y, sw, sh).await?;
-
-            // 探测（首个手势结束）：画面零变化 = 该机型丢弃 scrcpy 注入
-            if !h.touch_probe_done.load(std::sync::atomic::Ordering::Relaxed) {
-                match action_id {
-                    ACTION_DOWN => {
-                        *h.down_info.lock().unwrap() = Some((
-                            x,
-                            y,
-                            h.frames.total.load(std::sync::atomic::Ordering::Relaxed),
-                        ));
-                    }
-                    ACTION_UP => {
-                        h.touch_probe_done
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                        let down = h.down_info.lock().unwrap().take();
-                        if let Some((ox, oy, fr0)) = down {
-                            let deadline =
-                                std::time::Instant::now() + Duration::from_millis(240);
-                            let mut delta = h
-                                .frames
-                                .total
-                                .load(std::sync::atomic::Ordering::Relaxed)
-                                .saturating_sub(fr0);
-                            while delta < 2 && std::time::Instant::now() < deadline {
-                                tokio::time::sleep(Duration::from_millis(80)).await;
-                                delta = h
-                                    .frames
-                                    .total
-                                    .load(std::sync::atomic::Ordering::Relaxed)
-                                    .saturating_sub(fr0);
-                            }
-                            if delta < 2 {
-                                h.touch_adb
-                                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                                eprintln!(
-                                    "[phonectrl] scrcpy 触摸注入无效（手势后画面无帧变化），回退逐手势 adb"
-                                );
-                                drop(guard);
-                                drop(streams);
-                                let moved = x.abs_diff(ox) + y.abs_diff(oy) > 30;
-                                if moved {
-                                    let (sx0, sy0) = device_coords(&state, &serial, ox, oy).await;
-                                    let (sx, sy) = device_coords(&state, &serial, x, y).await;
-                                    state
-                                        .input
-                                        .swipe(&state.adb, &serial, sx0, sy0, sx, sy, 250)
-                                        .await?;
-                                } else {
-                                    let (sx, sy) = device_coords(&state, &serial, x, y).await;
-                                    state.input.tap(&state.adb, &serial, sx, sy).await?;
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                return Ok(());
-            }
             return Ok(());
         }
     }

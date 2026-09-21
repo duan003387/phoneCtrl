@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { touch, key, text } from "../api/input";
 import { KEYMAP } from "../keymap";
 import { H264Player } from "../h264player";
@@ -17,15 +17,18 @@ const MOVE_THROTTLE_MS = 30;
 export function MirrorCanvas({ serial, stream, recorder }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [painted, setPainted] = useState(false);
 
   // WebCodecs 播放器生命周期：随流地址创建/销毁
   useEffect(() => {
     const canvas = canvasRef.current;
     const url = stream.meta?.streamUrl;
     if (!canvas || !url || stream.state !== "streaming") return;
+    setPainted(false);
     let player: H264Player | null = null;
     try {
       player = new H264Player(canvas, url);
+      player.onFirstFrame = () => setPainted(true);
       player.start();
     } catch (e) {
       console.error("[h264] 播放器初始化失败", e);
@@ -162,7 +165,8 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [serial, stream.meta, recorder]);
 
-  const showPlaceholder = stream.state !== "streaming" || !stream.meta;
+  const showPlaceholder =
+    stream.state !== "streaming" || !stream.meta || (stream.state === "streaming" && !painted);
 
   return (
     <div className="mirror-wrap">
@@ -185,11 +189,13 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
           <canvas
             ref={canvasRef}
             className="mirror-img"
+            style={{ opacity: painted ? 1 : 0 }}
           />
         )}
         {showPlaceholder && (
           <div className="mirror-placeholder">
             {stream.state === "starting" && "正在启动投屏…"}
+            {stream.state === "streaming" && !painted && "正在建立画面…"}
             {stream.state === "idle" && "点击「开始投屏」查看设备画面"}
             {stream.state === "error" && <span className="err-text">投屏失败：{stream.error}</span>}
           </div>

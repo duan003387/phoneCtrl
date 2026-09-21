@@ -28,6 +28,7 @@ export interface AppConfig {
   streamMaxWidth: number;
   streamFps: number;
   streamQuality: number;
+  touchBackend: "auto" | "scrcpy";
 }
 
 export interface StreamOpts {

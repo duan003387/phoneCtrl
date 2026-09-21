@@ -48,13 +48,34 @@ public final class InputBridge {
     private static byte[] evBuf;
     private static BufferedOutputStream out;
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) {
+        try {
+            startup(args);
+        } catch (Throwable t) {
+            // 任何启动期异常（权限拒绝/设备缺失/结构探测失败）都以 BRIDGE_ERR 显式报出，
+            // 避免堆栈被上层吞掉导致「注入桥静默不工作」。
+            System.err.println("BRIDGE_ERR exception: " + t);
+            Throwable c = t.getCause();
+            while (c != null) {
+                System.err.println("BRIDGE_ERR caused by: " + c);
+                c = c.getCause();
+            }
+            System.exit(3);
+        }
+    }
+
+    private static void startup(String[] args) throws Exception {
         readScreenSize();
+        // 诊断：列出候选触摸节点与其可读性
+        System.err.println("BRIDGE_INFO /dev/input exists="
+                + new java.io.File("/dev/input").exists()
+                + " uid=" + run("id"));
         Probe probe = (args.length > 0 && !args[0].isEmpty())
                 ? probeNode(args[0])
                 : autoDetect();
         if (probe == null || probe.dev == null) {
-            System.err.println("BRIDGE_ERR no-touch-device");
+            System.err.println("BRIDGE_ERR no-touch-device getevent=\""
+                    + run("getevent", "-p").replaceAll("\\s+", " ").trim() + "\"");
             System.exit(2);
             return;
         }

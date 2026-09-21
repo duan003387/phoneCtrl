@@ -17,6 +17,14 @@ pub struct AppConfig {
     pub stream_fps: u32,
     /// MJPEG 质量 (ffmpeg -q:v)
     pub stream_quality: u32,
+    /// 触摸注入后端："auto"（桥可用走桥，否则走一定能用的 adb）
+    /// 或 "scrcpy"（优先 scrcpy 控制通道，低延迟实时拖拽，但部分机型会静默丢弃）
+    #[serde(default = "default_touch_backend")]
+    pub touch_backend: String,
+}
+
+fn default_touch_backend() -> String {
+    "auto".into()
 }
 
 impl Default for AppConfig {
@@ -28,6 +36,7 @@ impl Default for AppConfig {
             stream_max_width: 720,
             stream_fps: 60,
             stream_quality: 10,
+            touch_backend: "auto".into(),
         }
     }
 }

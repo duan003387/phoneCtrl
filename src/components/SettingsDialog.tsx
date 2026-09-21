@@ -57,6 +57,14 @@ export function SettingsDialog({ onClose, notify }: Props) {
           <input type="number" min={1_000_000} max={20_000_000} step={500_000} value={cfg.streamBitrate}
             onChange={(e) => setCfg({ ...cfg, streamBitrate: Number(e.target.value) })} />
         </label>
+        <label className="field">
+          触摸注入后端
+          <select value={cfg.touchBackend}
+            onChange={(e) => setCfg({ ...cfg, touchBackend: e.target.value as "auto" | "scrcpy" })}>
+            <option value="auto">auto（默认：adb，兼容性最好一定能点）</option>
+            <option value="scrcpy">scrcpy（低延迟实时拖拽，部分机型会失效）</option>
+          </select>
+        </label>
         {diag && (
           <pre className="diag">环境诊断：{diag}</pre>
         )}

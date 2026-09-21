@@ -62,22 +62,16 @@ pub struct StreamHandle {
     pub stop: watch::Sender<bool>,
     /// scrcpy 控制通道（输入注入用）
     pub control: ControlSlot,
-    /// H.264 AU 分发中心（total 计数用于触摸注入有效性探测）
-    pub frames: Arc<H264Hub>,
     /// 设备物理分辨率（触摸坐标 流→设备 换算用）
     pub screen: (u32, u32),
     /// 系统锁屏（keyguard）是否正在显示：仅用于 scrcpy 通道判定（虚拟显示器
     /// 锁屏忽略注入）。sendevent 桥走内核真实输入不受影响，锁屏亦可注入。
     pub keyguard: std::sync::atomic::AtomicBool,
     /// scrcpy 触摸注入失效标记：部分机型（三星 One UI 8 等）丢弃 scrcpy 服务器的
-    /// ASYNC 注入（按键+触摸全丢），探测确认后不再使用 scrcpy 触摸通道。
+    /// ASYNC 注入；scrcpy 后端模式下探测确认后不再使用 scrcpy 触摸通道。
     pub touch_adb: std::sync::atomic::AtomicBool,
-    /// 触摸注入有效性探测是否已完成（每流只探测一次）
-    pub touch_probe_done: std::sync::atomic::AtomicBool,
     /// sendevent 注入桥是否就绪（启动时收到 BRIDGE_READY 即置真，作为触摸首选通道）
     pub bridge_ok: std::sync::atomic::AtomicBool,
-    /// 当前按下的起点与按下时帧数：up 时用于探测注入有效性并重放手势
-    pub down_info: std::sync::Mutex<Option<(u32, u32, u64)>>,
     /// 注入桥 stdin（写入事件）与进程句柄
     pub bridge_stdin: std::sync::Mutex<Option<std::process::ChildStdin>>,
     pub bridge_child: std::sync::Mutex<Option<std::process::Child>>,
@@ -90,8 +84,40 @@ pub struct StreamHandle {
 pub struct H264Hub {
     subs: std::sync::Mutex<Vec<(u64, std::sync::mpsc::SyncSender<Arc<Vec<u8>>>)>>,
     next_id: std::sync::atomic::AtomicU64,
+    /// 最近一个关键帧 AU（Annex-B）：新客户端订阅时优先下发，保证 WebCodecs 能立即起步
+    last_key: std::sync::Mutex<Option<Arc<Vec<u8>>>>,
     /// 累计 AU 数（触摸注入有效性探测信号）
     pub total: std::sync::atomic::AtomicU64,
+}
+
+/// 判断一段 Annex-B access unit 是否含 IDR（NAL 5）——即可作为解码起点的关键帧。
+/// 只认 IDR 而非 SPS(7)：scrcpy 会先发一包仅含 SPS/PPS 的配置 AU，那不含图像数据，
+/// 不能当作可供 WebCodecs 起步的关键帧缓存。
+fn is_keyframe_au(au: &[u8]) -> bool {
+    let n = au.len();
+    let mut i = 0;
+    while i + 2 < n {
+        let sc = if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
+            3
+        } else if i + 3 < n && au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 0 && au[i + 3] == 1 {
+            4
+        } else {
+            0
+        };
+        if sc == 0 {
+            i += 1;
+            continue;
+        }
+        let body = i + sc;
+        if body < n {
+            let t = au[body] & 0x1f;
+            if t == 5 {
+                return true;
+            }
+        }
+        i = body;
+    }
+    false
 }
 
 impl H264Hub {
@@ -99,8 +125,14 @@ impl H264Hub {
         Arc::new(Self {
             subs: std::sync::Mutex::new(Vec::new()),
             next_id: std::sync::atomic::AtomicU64::new(1),
+            last_key: std::sync::Mutex::new(None),
             total: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// 最近一个关键帧 AU（供新订阅者起步用）。
+    fn last_key(&self) -> Option<Arc<Vec<u8>>> {
+        self.last_key.lock().unwrap().clone()
     }
 
     /// 新客户端订阅；返回接收端与其 id（用于注销）。
@@ -119,6 +151,9 @@ impl H264Hub {
     fn push(&self, au: Arc<Vec<u8>>) {
         self.total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if is_keyframe_au(&au) {
+            *self.last_key.lock().unwrap() = Some(au.clone());
+        }
         let mut subs = self.subs.lock().unwrap();
         subs.retain(|(_, tx)| match tx.try_send(au.clone()) {
             Ok(()) => true,
@@ -164,17 +199,31 @@ fn serve_client(mut stream: TcpStream, hub: Arc<H264Hub>) {
         return;
     }
 
-    // 订阅并排空历史积压，只喂订阅之后的连续 AU 序列。
+    // 订阅新客户端。注意：不能排空队列——那会丢掉本会话的起始关键帧。
     let (id, rx) = hub.subscribe();
-    while rx.try_recv().is_ok() {}
+    // 写一个长度前缀帧的小工具。
+    let write_framed = |s: &mut TcpStream, au: &[u8]| -> std::io::Result<()> {
+        s.write_all(&(au.len() as u32).to_be_bytes())?;
+        s.write_all(au)
+    };
+    // 若已有缓存 IDR（客户端较晚接入），先下发它让画面立即可见；随后需等到
+    // 下一个真正 IDR 再接续实时帧，避免拼接出引用了被跳过帧的损坏画面。
+    let mut need_key = false;
+    if let Some(key) = hub.last_key() {
+        if write_framed(&mut stream, &key).is_err() {
+            hub.unsubscribe(id);
+            return;
+        }
+        need_key = true;
+    }
     loop {
         match rx.recv() {
             Ok(au) => {
-                let len = (au.len() as u32).to_be_bytes();
-                let ok = stream
-                    .write_all(&len)
-                    .and_then(|_| stream.write_all(&au));
-                if ok.is_err() {
+                if need_key && !is_keyframe_au(&au) {
+                    continue; // 等下一个 IDR
+                }
+                need_key = false;
+                if write_framed(&mut stream, &au).is_err() {
                     hub.unsubscribe(id);
                     return;
                 }
@@ -239,13 +288,10 @@ pub async fn stream_start(
         meta: std::sync::RwLock::new(meta.clone()),
         stop: stop_tx,
         control: control.clone(),
-        frames: hub.clone(),
         screen,
         keyguard: std::sync::atomic::AtomicBool::new(false),
         touch_adb: std::sync::atomic::AtomicBool::new(false),
-        touch_probe_done: std::sync::atomic::AtomicBool::new(false),
         bridge_ok: std::sync::atomic::AtomicBool::new(false),
-        down_info: std::sync::Mutex::new(None),
         bridge_stdin: std::sync::Mutex::new(None),
         bridge_child: std::sync::Mutex::new(None),
     });
@@ -357,9 +403,10 @@ async fn run_pipeline(
         let _ = adb
             .run(Some(&serial), &["shell", "pkill", "-9", "-f", "com.genymobile.scrcpy.Server"])
             .await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
 
         eprintln!("[phonectrl] pipeline iter start");
+        let t_spawn = std::time::Instant::now();
         let mut producer = match spawn_scrcpy(
             &adb,
             &serial,
@@ -378,6 +425,10 @@ async fn run_pipeline(
                 break;
             }
         };
+        eprintln!(
+            "[phonectrl] ⏱ spawn_scrcpy(推送+转发+启动+连接) 用时 {:?}",
+            t_spawn.elapsed()
+        );
 
         // 读取服务器上报的真实视频尺寸。编码器对齐要求（三星等机型为 16px）
         // 会使实际尺寸与本地推算不同；触摸事件的 screenSize 必须与之一致，
@@ -569,29 +620,29 @@ async fn spawn_scrcpy(
     let bridge_jar = bridge_jar_path()
         .ok_or_else(|| AppError::Stream("未找到 inputbridge.jar 资源".into()))?;
 
-    // 推送服务器与注入桥 jar。每次迭代都推：设备端 /data/local/tmp 可能被
-    // 设备管理代理周期性清理，残留检测不可靠。
-    let out = adb.run(Some(serial), &["push", &jar.to_string_lossy(), SERVER_REMOTE_PATH]).await?;
-    if out.code != 0 {
-        return Err(AppError::Adb(format!("推送 scrcpy-server 失败: {}", out.stderr.trim())));
-    }
-    let out = adb
-        .run(Some(serial), &["push", &bridge_jar.to_string_lossy(), BRIDGE_REMOTE_PATH])
-        .await?;
-    if out.code != 0 {
-        return Err(AppError::Adb(format!("推送注入桥失败: {}", out.stderr.trim())));
-    }
+    // 推送服务器与注入桥 jar（按需：设备端已存在且大小一致则跳过）。两个推送并发。
+    let (push_server, push_bridge) = tokio::join!(
+        push_if_changed(adb, serial, &jar, SERVER_REMOTE_PATH, "scrcpy-server"),
+        push_if_changed(adb, serial, &bridge_jar, BRIDGE_REMOTE_PATH, "注入桥"),
+    );
+    push_server?;
+    push_bridge?;
 
     let (video_port, control_port) = forward_ports(serial);
-    let fwd_v = adb
-        .run(Some(serial), &["forward", &format!("tcp:{video_port}"), "localabstract:scrcpy"])
-        .await?;
+    // 两个端口转发并发建立。
+    let fwd_video_arg = format!("tcp:{video_port}");
+    let fwd_ctrl_arg = format!("tcp:{control_port}");
+    let fwd_v_args = ["forward", fwd_video_arg.as_str(), "localabstract:scrcpy"];
+    let fwd_c_args = ["forward", fwd_ctrl_arg.as_str(), "localabstract:scrcpy"];
+    let (fwd_v, fwd_c) = tokio::join!(
+        adb.run(Some(serial), &fwd_v_args),
+        adb.run(Some(serial), &fwd_c_args),
+    );
+    let fwd_v = fwd_v?;
+    let fwd_c = fwd_c?;
     if fwd_v.code != 0 {
         return Err(AppError::Adb(format!("adb forward(视频) 失败: {}", fwd_v.stderr.trim())));
     }
-    let fwd_c = adb
-        .run(Some(serial), &["forward", &format!("tcp:{control_port}"), "localabstract:scrcpy"])
-        .await?;
     if fwd_c.code != 0 {
         return Err(AppError::Adb(format!("adb forward(控制) 失败: {}", fwd_c.stderr.trim())));
     }
@@ -665,6 +716,9 @@ async fn spawn_scrcpy(
                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                         } else if line.contains("BRIDGE_ERR") {
                             eprintln!("[phonectrl] 注入桥不可用: {line}");
+                        } else {
+                            // 其它输出（Java 异常/权限拒绝/崩溃堆栈）也回显，便于诊断
+                            eprintln!("[bridge] {line}");
                         }
                     }
                 });
@@ -685,6 +739,41 @@ async fn spawn_scrcpy(
     })
 }
 
+/// 读设备端文件字节数（存在时）。
+async fn remote_size(adb: &AdbClient, serial: &str, path: &str) -> Option<u64> {
+    let out = adb
+        .run(Some(serial), &["shell", "stat", "-c", "%s", path])
+        .await
+        .ok()?;
+    if out.code == 0 {
+        out.stdout.trim().parse::<u64>().ok()
+    } else {
+        None
+    }
+}
+
+/// 仅当设备端文件缺失或大小与本地不一致时才 push。
+/// scrcpy-server 与注入桥 jar 内容固定，重复投屏时这一步能省掉 ~0.3–0.6s 推送往返。
+async fn push_if_changed(
+    adb: &AdbClient,
+    serial: &str,
+    local: &std::path::Path,
+    remote: &str,
+    label: &str,
+) -> AppResult<()> {
+    let local_len = std::fs::metadata(local).map(|m| m.len()).unwrap_or(0);
+    if local_len > 0 && remote_size(adb, serial, remote).await == Some(local_len) {
+        return Ok(());
+    }
+    let out = adb
+        .run(Some(serial), &["push", &local.to_string_lossy(), remote])
+        .await?;
+    if out.code != 0 {
+        return Err(AppError::Adb(format!("推送 {label} 失败: {}", out.stderr.trim())));
+    }
+    Ok(())
+}
+
 /// 连接视频通道并读取 dummy 字节；EOF/失败则重试（服务器可能尚未就绪）。
 async fn connect_video_with_retry(port: u16) -> AppResult<TcpStream> {
     let mut last = None;
@@ -701,7 +790,7 @@ async fn connect_video_with_retry(port: u16) -> AppResult<TcpStream> {
             Ok(s) => return Ok(s),
             Err(e) => last = Some(e),
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
     }
     Err(AppError::Stream(format!(
         "连接 scrcpy 视频隧道失败: {}",

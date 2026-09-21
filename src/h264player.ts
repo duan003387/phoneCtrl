@@ -100,6 +100,8 @@ export class H264Player {
   private frameTs = 0;
   private running = false;
   public onStats?: (fps: number, width: number, height: number) => void;
+  public onFirstFrame?: () => void;
+  private firstFrameFired = false;
   private frameCount = 0;
   private lastStatsAt = performance.now();
 
@@ -170,6 +172,10 @@ export class H264Player {
       this.canvas.height = h;
     }
     this.ctx.drawImage(frame, 0, 0, w, h);
+    if (!this.firstFrameFired) {
+      this.firstFrameFired = true;
+      this.onFirstFrame?.();
+    }
     this.frameCount++;
     const now = performance.now();
     if (now - this.lastStatsAt >= 1000) {
@@ -182,26 +188,31 @@ export class H264Player {
 
   private feed(au: Uint8Array) {
     const nalus = parseAnnexB(au);
-    let hasKey = false;
+    // 提取 SPS/PPS 供构造 description；chunk 数据只保留 slice NAL（1=非IDR,5=IDR）。
+    let hasIdr = false;
+    const slices: Nalu[] = [];
     for (const n of nalus) {
       if (n.type === 7 && !this.sps) this.sps = n.data;
       else if (n.type === 8 && !this.pps) this.pps = n.data;
-      if (n.type === 5 || n.type === 7) hasKey = true;
+      if (n.type === 5) hasIdr = true;
+      if (n.type === 1 || n.type === 5) slices.push(n);
     }
+    // 纯配置包（SPS/PPS/AUD，无 slice）：仅用于取参数，不喂解码器。
+    if (slices.length === 0) return;
     if (!this.configured) {
       this.ensureDecoder();
       if (!this.configured) return; // 尚未拿到 SPS/PPS
     }
-    // 解码器（重新）配置后必须从关键帧起步，否则丢弃 delta 直到下一个关键帧
+    // 解码器（重新）配置后必须以 IDR 关键帧起步，否则丢弃直到下一个 IDR。
     if (!this.started) {
-      if (!hasKey) return;
+      if (!hasIdr) return;
       this.started = true;
     }
-    const data = toAVCC(nalus);
+    const data = toAVCC(slices);
     try {
       this.decoder!.decode(
         new EncodedVideoChunk({
-          type: hasKey ? "key" : "delta",
+          type: hasIdr ? "key" : "delta",
           timestamp: this.frameTs,
           data,
         }),
