@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 允许执行/加载非本团队签名的嵌套二进制（内置 node、adb、解包出的 appium）-->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- 允许 dyld 环境变量（node/子进程运行时可能需要）-->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <!-- 允许未签名可执行内存（V8/Node JIT 需要）-->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- 出站网络（scrcpy/adb/appium 本地通信，非必需但无害）-->
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.network.server</key>
+  <true/>
+</dict>
+</plist>

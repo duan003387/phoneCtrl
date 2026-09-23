@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Tauri updater 签名私钥（绝不提交；公钥 .pub 可提交）
+.tauri/*.key
+
+# 内置离线 Appium 运行时由 scripts/bundle-appium.sh 生成（>100M，勿提交）
+src-tauri/resources/appium-bundle.tar.gz

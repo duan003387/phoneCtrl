@@ -12,3 +12,7 @@ export const screenshotSave = (serial: string) =>
 
 export const record = (serial: string, seconds: number) =>
   invoke<string>("action_record", { serial, seconds });
+
+/** 保存前端录制的镜像视频（base64）到本地，返回路径。 */
+export const saveLocalVideo = (name: string, data: string) =>
+  invoke<string>("save_local_video", { name, data });

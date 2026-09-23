@@ -11,6 +11,7 @@ import { useDeviceList } from "./hooks/useDeviceList";
 import { useStream } from "./hooks/useStream";
 import { useMacroRecorder } from "./hooks/useMacroRecorder";
 import { deviceProps } from "./api/devices";
+import { runUpdateFlow } from "./api/update";
 import type { DeviceProps } from "./types";
 import {
   IconMirror,
@@ -81,6 +82,12 @@ function App() {
       clearInterval(t);
     };
   }, [serial, stream.state]);
+
+  // 启动后自动检查更新（发现新版才提示）
+  useEffect(() => {
+    const id = window.setTimeout(() => void runUpdateFlow(notify, { auto: true }), 1500);
+    return () => clearTimeout(id);
+  }, [notify]);
 
   return (
     <div className={`app-workspace ${sidebarOpen ? "with-sidebar" : "sidebar-collapsed"}`}>

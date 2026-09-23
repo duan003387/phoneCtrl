@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { diagnostics, settingsGet, settingsSet } from "../api/devices";
+import { runUpdateFlow } from "../api/update";
 import type { AppConfig } from "../types";
 import { IconSettings, IconX } from "./Icons";
 
@@ -12,6 +13,7 @@ export function SettingsDialog({ onClose, notify }: Props) {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [diag, setDiag] = useState<string>("");
   const [saving, setSaving] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   useEffect(() => {
     void settingsGet().then(setCfg);
@@ -144,6 +146,29 @@ export function SettingsDialog({ onClose, notify }: Props) {
             <pre className="diag-code-box">{diag}</pre>
           </div>
         )}
+
+        {/* 关于与更新 */}
+        <div className="settings-section">
+          <div className="settings-section-title">关于与更新</div>
+          <div className="form-item">
+            <label className="form-label">应用内更新</label>
+            <span className="form-desc">检查新版本 → 自动下载 → 安装并重启，无需重新拖入「应用程序」</span>
+            <button
+              className="btn"
+              disabled={checkingUpdate}
+              onClick={async () => {
+                setCheckingUpdate(true);
+                try {
+                  await runUpdateFlow(notify, { auto: false });
+                } finally {
+                  setCheckingUpdate(false);
+                }
+              }}
+            >
+              {checkingUpdate ? "检查中…" : "检查更新"}
+            </button>
+          </div>
+        </div>
 
         {/* 操作区 */}
         <div className="modal-actions">

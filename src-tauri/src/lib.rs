@@ -14,6 +14,8 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;
@@ -66,6 +68,7 @@ pub fn run() {
             commands::action_screenshot,
             commands::action_screenshot_save,
             commands::action_record,
+            commands::save_local_video,
             commands::action_key,
             // 宏
             commands::macro_save,

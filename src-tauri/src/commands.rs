@@ -567,6 +567,25 @@ pub async fn action_record(state: State<'_, AppState>, serial: String, seconds: 
     state.adb.record(&serial, seconds).await
 }
 
+/// 保存前端录制的镜像视频（base64）到本地 Downloads，返回路径。
+/// 用于设备端 `screenrecord` 不可用（如华为 SELinux 拦截）时的跨设备录屏。
+#[tauri::command]
+pub async fn save_local_video(name: String, data: String) -> AppResult<String> {
+    use base64::Engine;
+    // 过滤非法路径字符，只保留文件名。
+    let safe: String = name
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':') { '_' } else { c })
+        .collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())))?;
+    let dir = crate::util::downloads_dir()?;
+    let path = dir.join(safe);
+    tokio::fs::write(&path, &bytes).await?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn action_key(
     state: State<'_, AppState>,
