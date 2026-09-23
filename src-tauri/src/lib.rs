@@ -1,4 +1,5 @@
 mod adb;
+mod automate;
 mod commands;
 mod config;
 mod error;
@@ -71,6 +72,9 @@ pub fn run() {
             commands::macro_list,
             commands::macro_delete,
             commands::macro_play,
+            // 自动化测试（Appium）
+            automate::automate_run,
+            automate::automate_env,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

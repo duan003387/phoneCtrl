@@ -29,7 +29,8 @@
     "resources": {
       "resources/scrcpy-server-v4.0.jar": "scrcpy-server-v4.0.jar",
       "resources/inputbridge.jar": "inputbridge.jar",
-      "resources/adb/*": "adb/"
+      "resources/adb/*": "adb/",
+      "resources/appium-bundle.tar.gz": "appium-bundle.tar.gz"
     },
     "icon": [
       "icons/32x32.png",

@@ -2,9 +2,6 @@ import { useState } from "react";
 import { key as actionKey, screenshotSave, record } from "../api/actions";
 import { text } from "../api/input";
 import {
-  KEYCODE_HOME,
-  KEYCODE_BACK,
-  KEYCODE_APP_SWITCH,
   KEYCODE_POWER,
   KEYCODE_WAKEUP,
   KEYCODE_VOLUME_UP,
@@ -13,9 +10,6 @@ import {
 import type { StreamSession } from "../hooks/useStream";
 import type { MacroRecorder } from "../hooks/useMacroRecorder";
 import {
-  IconBack,
-  IconHome,
-  IconTasks,
   IconPower,
   IconSun,
   IconVolumeUp,
@@ -74,22 +68,6 @@ export function ControlOverlay({ serial, stream, recorder, notify }: Props) {
   return (
     <div className="sidebar-control-panel">
       <div className="sidebar-section-title">手机控制</div>
-
-      {/* 虚拟导航三键 */}
-      <div className="sidebar-key-grid-3">
-        <button className="sidebar-action-btn" title="返回键 (Back)" onClick={() => sendKey(KEYCODE_BACK)}>
-          <IconBack size={16} />
-          <span>返回</span>
-        </button>
-        <button className="sidebar-action-btn" title="桌面主页 (Home)" onClick={() => sendKey(KEYCODE_HOME)}>
-          <IconHome size={16} />
-          <span>桌面</span>
-        </button>
-        <button className="sidebar-action-btn" title="多任务切换 (Recents)" onClick={() => sendKey(KEYCODE_APP_SWITCH)}>
-          <IconTasks size={16} />
-          <span>多任务</span>
-        </button>
-      </div>
 
       {/* 硬件物理按键 */}
       <div className="sidebar-key-grid-4">

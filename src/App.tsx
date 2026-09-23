@@ -4,6 +4,7 @@ import { MirrorTab } from "./components/MirrorTab";
 import { FilePanel } from "./components/FilePanel";
 import { AppPanel } from "./components/AppPanel";
 import { MacroPanel } from "./components/MacroPanel";
+import { AutoPanel } from "./components/AutoPanel";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { ControlOverlay } from "./components/ControlOverlay";
 import { useDeviceList } from "./hooks/useDeviceList";
@@ -20,15 +21,17 @@ import {
   IconRefresh,
   IconSettings,
   IconBattery,
+  IconPlay,
 } from "./components/Icons";
 
-type Tab = "mirror" | "files" | "apps" | "macros";
+type Tab = "mirror" | "files" | "apps" | "macros" | "auto";
 
 const TABS: { key: Tab; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
   { key: "mirror", label: "投屏镜像", icon: IconMirror },
   { key: "files", label: "文件管理", icon: IconFolder },
   { key: "apps", label: "应用管理", icon: IconApps },
   { key: "macros", label: "动作宏", icon: IconMacro },
+  { key: "auto", label: "自动化", icon: IconPlay },
 ];
 
 const STREAM_LABEL: Record<string, string> = {
@@ -261,6 +264,17 @@ function App() {
 
         {tab === "macros" && (
           <MacroPanel serial={serial} notify={notify} />
+        )}
+
+        {tab === "auto" && (
+          serial ? (
+            <AutoPanel serial={serial} notify={notify} />
+          ) : (
+            <div className="empty-state">
+              <IconPlay size={56} className="empty-state-icon" />
+              <span>请在左侧侧边栏选择设备以运行自动化用例</span>
+            </div>
+          )
         )}
       </main>
 

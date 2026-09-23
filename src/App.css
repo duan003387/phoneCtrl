@@ -1121,3 +1121,47 @@ body {
   border: 1px solid var(--danger);
   color: #fef2f2;
 }
+
+/* ── 自动化页控件（深色下拉/输入） ── */
+.app-stage select,
+.field-inline {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  font-size: 13px;
+}
+.app-stage .table-wrap input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  font-size: 13px;
+}
+
+/* ── 投屏画面底部虚拟导航三键（独立成行，不遮挡画面） ── */
+.mirror-nav-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  padding: 10px 0 4px;
+}
+.nav-btn {
+  width: 46px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elev, var(--bg-panel));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+}
+.nav-btn:hover { background: var(--bg-hover); border-color: #40475a; }
+.nav-btn:active { transform: translateY(1px); }
