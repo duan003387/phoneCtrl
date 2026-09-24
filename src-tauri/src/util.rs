@@ -130,3 +130,29 @@ pub fn ensure_executable(path: &std::path::Path) {
 
 #[cfg(not(unix))]
 pub fn ensure_executable(_path: &std::path::Path) {}
+
+// ────────────────────────── Windows 子进程控制台抑制 ──────────────────────────
+//
+// release 构建里 main.rs 用 `windows_subsystem = "windows"`，进程没有附着控制台；
+// 此时每拉起一个控制台子系统子进程（adb.exe 是），Windows 会给它新建一个控制台
+// 窗口。adb 属于轮询级高频调用（设备列表/属性/输入回退），不加这个标志就是满屏闪 cmd 窗口。
+// CREATE_NO_WINDOW = 0x0800_0000。dev 构建附着了父控制台所以看不出来，只在安装包上复现。
+
+/// std::process::Command 版本。
+#[cfg(windows)]
+pub fn hide_console(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000);
+}
+
+/// tokio::process::Command 版本。
+#[cfg(windows)]
+pub fn hide_console_async(cmd: &mut tokio::process::Command) {
+    cmd.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+pub fn hide_console(_cmd: &mut std::process::Command) {}
+
+#[cfg(not(windows))]
+pub fn hide_console_async(_cmd: &mut tokio::process::Command) {}

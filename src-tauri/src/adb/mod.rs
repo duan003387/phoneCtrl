@@ -63,7 +63,10 @@ impl AdbClient {
         cmd_args.extend(args.iter().map(|a| a.to_string()));
         let adb2 = adb.clone();
         let output = tauri::async_runtime::spawn_blocking(move || {
-            Command::new(&adb2).args(&cmd_args).output()
+            let mut c = Command::new(&adb2);
+            c.args(&cmd_args);
+            crate::util::hide_console(&mut c);
+            c.output()
         })
         .await
         .map_err(|e| AppError::Adb(e.to_string()))?
@@ -87,7 +90,10 @@ impl AdbClient {
         cmd_args.extend(args.iter().map(|a| a.to_string()));
         let adb2 = adb.clone();
         let output = tauri::async_runtime::spawn_blocking(move || {
-            Command::new(&adb2).args(&cmd_args).output()
+            let mut c = Command::new(&adb2);
+            c.args(&cmd_args);
+            crate::util::hide_console(&mut c);
+            c.output()
         })
         .await
         .map_err(|e| AppError::Adb(e.to_string()))?
@@ -118,6 +124,7 @@ impl AdbClient {
             cmd.arg("-s").arg(s);
         }
         cmd.args(args).stdin(stdin).stdout(stdout).stderr(stderr);
+        crate::util::hide_console(&mut cmd);
         cmd.spawn().map_err(|e| AppError::Adb(e.to_string()))
     }
 

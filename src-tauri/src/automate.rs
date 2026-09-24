@@ -112,10 +112,10 @@ fn npx_program() -> &'static str {
 }
 
 async fn run_cmd(program: &str, args: &[&str]) -> AppResult<(i32, String)> {
-    let out = tokio::process::Command::new(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut c = tokio::process::Command::new(program);
+    c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::util::hide_console_async(&mut c);
+    let out = c
         .output()
         .await
         .map_err(|e| AppError::Config(format!("启动 {program} 失败: {e}")))?;
@@ -167,11 +167,10 @@ fn bundled_launch(config_dir: &std::path::Path) -> Option<Launch> {
         let _ = std::fs::remove_dir_all(&dest);
         std::fs::create_dir_all(&dest).ok()?;
         // 用系统 tar 解包（mac/linux 自带；Windows 10+ 亦有 tar）
-        let ok = std::process::Command::new("tar")
-            .args(["-xzf", &bundle.to_string_lossy(), "-C", &dest.to_string_lossy()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let mut tc = std::process::Command::new("tar");
+        tc.args(["-xzf", &bundle.to_string_lossy(), "-C", &dest.to_string_lossy()]);
+        crate::util::hide_console(&mut tc);
+        let ok = tc.status().map(|s| s.success()).unwrap_or(false);
         if !ok {
             // 半截目录留着会让下次误判为已就绪，清掉再回退
             let _ = std::fs::remove_dir_all(&dest);
@@ -294,12 +293,7 @@ pub async fn ensure_appium(config_dir: &std::path::Path) -> AppResult<()> {
             if let Some(home) = &launch.apium_home {
                 cb.env("APPIUM_HOME", home);
             }
-            #[cfg(windows)]
-            {
-                // CREATE_NO_WINDOW：服务是后台常驻的，别在桌面上弹一扇 node 控制台
-                use std::os::windows::process::CommandExt;
-                cb.creation_flags(0x0800_0000);
-            }
+            crate::util::hide_console(&mut cb);
             let child = cb
                 .spawn()
                 .map_err(|e| AppError::Config(format!("启动 appium server 失败({}): {e}", launch.label)))?;
@@ -328,13 +322,13 @@ async fn run_cmd_for(l: &Launch, extra: &[&str]) -> (i32, String) {
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let owned = program;
     if let Some(home) = &l.apium_home {
-        let out = tokio::process::Command::new(&owned)
-            .args(&refs)
+        let mut c = tokio::process::Command::new(&owned);
+        c.args(&refs)
             .env("APPIUM_HOME", home)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+            .stderr(Stdio::piped());
+        crate::util::hide_console_async(&mut c);
+        let out = c.output().await;
         match out {
             Ok(o) => (
                 o.status.code().unwrap_or(-1),
