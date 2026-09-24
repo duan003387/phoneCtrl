@@ -40,25 +40,50 @@ export APPLE_SIGNING_IDENTITY="$IDENTITY"
 cd "$ROOT"
 npm run tauri build
 
-APP="$TAURI/target/release/bundle/macos/PhoneCtrl.app"
-DMG="$TAURI/target/release/bundle/dmg/PhoneCtrl_0.1.0_aarch64.dmg"
+TARGET="$TAURI/target"
+# dmg 文件名里带的版本取自 tauri.conf.json；写死版本号会让改了版本的发布直接失败。
+VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$TAURI/tauri.conf.json" | head -1)"
+if [ -z "$VERSION" ]; then
+  echo "无法从 src-tauri/tauri.conf.json 解析 version" >&2
+  exit 1
+fi
 
-echo "[sign] 校验签名…"
-codesign --verify --deep --strict --verbose=2 "$APP"
-spctl -a -vv -t install "$APP" || true
+# 本机架构产物在 target/release/bundle/dmg，交叉 --target 构建在 target/<triple>/release/bundle/dmg。
+shopt -s nullglob
+DMGS=(
+  "$TARGET/release/bundle/dmg/PhoneCtrl_${VERSION}"_*.dmg
+  "$TARGET"/*/release/bundle/dmg/"PhoneCtrl_${VERSION}"_*.dmg
+)
+shopt -u nullglob
+if [ "${#DMGS[@]}" -eq 0 ]; then
+  echo "找不到 PhoneCtrl_${VERSION}_*.dmg：构建是否成功？是否换了 --target？" >&2
+  exit 1
+fi
 
-echo "[notarize] 提交公证（可能需要 1-5 分钟）…"
-xcrun notarytool submit "$DMG" \
-  --apple-id "$APPLE_ID" \
-  --password "$APPLE_APP_PWD" \
-  --team-id "$APPLE_TEAM_ID" \
-  --wait
+for DMG in "${DMGS[@]}"; do
+  # 每个 dmg 旁边就是同一次构建的 .app（bundle/dmg 与 bundle/macos 同级）
+  APP="$(dirname "$(dirname "$DMG")")/macos/PhoneCtrl.app"
+  if [ ! -d "$APP" ]; then
+    echo "缺少已签名的 $APP（tauri build 是否带了签名身份？）" >&2
+    exit 1
+  fi
 
-echo "[staple] 把公证票据钉到 dmg 上…"
-xcrun stapler staple "$DMG"
-xcrun stapler validate "$DMG"
+  echo "[sign] 校验签名：$(basename "$APP") ($APP)"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+  spctl -a -vv -t install "$APP" || true
 
-echo
-echo "完成 ✅  可分发：$DMG"
-echo "（对 .app 也一并 staple，便于拷盘分发）"
-xcrun stapler staple "$APP" 2>/dev/null || true
+  echo "[notarize] 提交公证：$(basename "$DMG")（可能需要 1-5 分钟）…"
+  xcrun notarytool submit "$DMG" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_APP_PWD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --wait
+
+  echo "[staple] 把公证票据钉到 dmg 上…"
+  xcrun stapler staple "$DMG"
+  xcrun stapler validate "$DMG"
+  # 对 .app 也一并 staple，便于拷盘分发
+  xcrun stapler staple "$APP" 2>/dev/null || true
+
+  echo "完成 ✅  可分发：$DMG"
+done

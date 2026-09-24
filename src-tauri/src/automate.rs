@@ -2,6 +2,7 @@ use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -9,17 +10,26 @@ use std::time::Duration;
 //
 // 解析顺序：
 //   1. 内置便携运行时：把随包分发的 appium-bundle.tar.gz 解到 <config>/appium-runtime/
-//      （含 bin/node、node_modules/appium、.appium 驱动），完全离线；
+//      （含 bin/node 或 bin/node.exe、node_modules/appium、.appium 驱动），完全离线；
 //   2. 系统全局 appium（PATH）；
 //   3. npx --prefer-offline appium（首次可能联网，之后走缓存）。
 // 都不可用时，运行用例报错并提示。
 
-const APPIUM_PORT: u16 = 4723;
-const APPIUM_NPX_SPEC: &str = "appium@2";
+/// 首选端口；被非 Appium 进程占住时向后顺延（见 `acquire_port`）。
+const APPIUM_PORT_FIRST: u16 = 4723;
+const APPIUM_PORT_SPAN: u16 = 10;
+/// npx 兜底与内置运行时必须同一主版本，否则同一套 WD 代码要同时适配两版 CLI
+/// （版本以 scripts/bundle-appium.sh 的 APPIUM_VERSION 为准）。
+const APPIUM_NPX_SPEC: &str = "appium@3";
+/// 内置运行时目录布局版本，与 bundle 字节数一起写进 .ready：换包/升级即强制重解。
+const APPIUM_BUNDLE_LAYOUT: &str = "3";
+
 static APPIUM_CHILD: Mutex<Option<Child>> = Mutex::new(None);
+/// 当前 Appium 服务端口，由 `ensure_appium` 选定；所有 WebDriver 请求据此拼 URL。
+static APPIUM_PORT: AtomicU16 = AtomicU16::new(APPIUM_PORT_FIRST);
 
 fn wd_base() -> String {
-    format!("http://127.0.0.1:{APPIUM_PORT}")
+    format!("http://127.0.0.1:{}", APPIUM_PORT.load(Ordering::Relaxed))
 }
 
 fn http() -> reqwest::Client {
@@ -29,9 +39,21 @@ fn http() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-/// GET /status 是否就绪。
-async fn appium_ready() -> bool {
-    match http().get(format!("{}/status", wd_base())).send().await {
+/// 健康/端口探测专用客户端：连到非 Appium 的监听者也不能挂住。
+fn probe_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap_or_default()
+}
+
+/// 指定端口上的 GET /status 是否就绪。
+async fn appium_ready_on(port: u16) -> bool {
+    match probe_http()
+        .get(format!("http://127.0.0.1:{port}/status"))
+        .send()
+        .await
+    {
         Ok(r) => {
             let status = r.status();
             if !status.is_success() {
@@ -47,6 +69,45 @@ async fn appium_ready() -> bool {
             }
         }
         Err(_) => false,
+    }
+}
+
+/// 本机端口是否可绑定（即空闲）。Appium 未监听但端口被别的服务占住时，
+/// 绑定失败能把它和「真正空闲」区分开。
+fn port_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// 选定服务端口：优先复用在跑的 Appium（免得重复起一份），否则取第一个空闲端口。
+/// 返回 (端口, 是否已就绪可直接用)。全部被占时退回首选端口，让后续报错指向真实原因。
+async fn acquire_port() -> (u16, bool) {
+    let mut first_free = None;
+    for port in APPIUM_PORT_FIRST..(APPIUM_PORT_FIRST + APPIUM_PORT_SPAN) {
+        if appium_ready_on(port).await {
+            return (port, true);
+        }
+        if first_free.is_none() && port_free(port) {
+            first_free = Some(port);
+        }
+    }
+    (first_free.unwrap_or(APPIUM_PORT_FIRST), false)
+}
+
+/// npm 家族在 Windows 上是 .cmd 批处理：CreateProcess 只自动补 .exe，不按 PATHEXT 解析，
+/// 故必须显式带后缀才能 spawn（unix 下保持原名，行为不变）。
+fn appium_programs() -> Vec<&'static str> {
+    if cfg!(windows) {
+        vec!["appium", "appium.cmd"]
+    } else {
+        vec!["appium"]
+    }
+}
+
+fn npx_program() -> &'static str {
+    if cfg!(windows) {
+        "npx.cmd"
+    } else {
+        "npx"
     }
 }
 
@@ -83,11 +144,27 @@ impl Launch {
 }
 
 /// 尝试从内置包解出便携运行时；返回其 appium 调用方式（若就绪）。
+/// 注意：解压是重 IO 操作，调用方需放到阻塞线程里（见 `resolve_launch`）。
 fn bundled_launch(config_dir: &std::path::Path) -> Option<Launch> {
     let bundle = crate::util::resolve_resource("appium-bundle.tar.gz")?;
+    // 未跑 bundle-appium.sh 时，build.rs 会补一个 0 字节占位（只为让 tauri
+    // bundle.resources 引用成立）。占位不是可用运行时，直接判不可用去走回退，
+    // 否则解压必失败还会留下半截目录。
+    let bundle_len = std::fs::metadata(&bundle).map(|m| m.len()).unwrap_or(0);
+    if bundle_len == 0 {
+        eprintln!("[automate] 内置 appium 包为占位空文件，跳过内置方式");
+        return None;
+    }
     let dest = config_dir.join("appium-runtime");
     let marker = dest.join(".ready");
-    if !marker.exists() {
+    // .ready 存「布局版本|bundle 字节数」：只判断存在的话，升级 Appium 或换包后
+    // 旧目录会被永久复用，改动永远不生效。
+    let expect = format!("{APPIUM_BUNDLE_LAYOUT}|{bundle_len}");
+    let fresh = std::fs::read_to_string(&marker)
+        .map(|s| s.trim() == expect)
+        .unwrap_or(false);
+    if !fresh {
+        let _ = std::fs::remove_dir_all(&dest);
         std::fs::create_dir_all(&dest).ok()?;
         // 用系统 tar 解包（mac/linux 自带；Windows 10+ 亦有 tar）
         let ok = std::process::Command::new("tar")
@@ -96,15 +173,19 @@ fn bundled_launch(config_dir: &std::path::Path) -> Option<Launch> {
             .map(|s| s.success())
             .unwrap_or(false);
         if !ok {
+            // 半截目录留着会让下次误判为已就绪，清掉再回退
+            let _ = std::fs::remove_dir_all(&dest);
             return None;
         }
-        let _ = std::fs::write(&marker, b"");
+        let _ = std::fs::write(&marker, expect.as_bytes());
     }
+    // 落盘名由打包机的 OS 决定（scripts/bundle-appium.sh 按 uname 选择 node / node.exe）
     let node = dest.join("bin").join(if cfg!(windows) { "node.exe" } else { "node" });
     if !node.exists() {
+        eprintln!("[automate] 内置运行时缺少 {}，回退其它方式", node.display());
         return None;
     }
-    // appium CLI 入口（package.json bin 指向 index.js；main.js 为兜底）
+    // appium CLI 入口（与 scripts/bundle-appium.sh 保持同一优先级：index.js 优先）
     let cli = ["node_modules/appium/index.js", "node_modules/appium/build/lib/main.js"]
         .iter()
         .map(|p| dest.join(p))
@@ -119,19 +200,29 @@ fn bundled_launch(config_dir: &std::path::Path) -> Option<Launch> {
 
 /// 选择可用的 appium 调用方式。
 async fn resolve_launch(config_dir: &std::path::Path) -> Launch {
-    if let Some(l) = bundled_launch(config_dir) {
+    // 内置包 >100M，解压可达数十秒：放阻塞线程，避免卡住 IPC 与投屏等其它命令
+    let dir_owned = config_dir.to_path_buf();
+    if let Ok(Some(l)) =
+        tauri::async_runtime::spawn_blocking(move || bundled_launch(&dir_owned)).await
+    {
         return l;
     }
-    if run_cmd("appium", &["--version"]).await.map(|(c, _)| c == 0).unwrap_or(false) {
-        return Launch {
-            program: "appium".into(),
-            prefix: vec![],
-            apium_home: None,
-            label: "全局",
-        };
+    for cand in appium_programs() {
+        if run_cmd(cand, &["--version"])
+            .await
+            .map(|(c, _)| c == 0)
+            .unwrap_or(false)
+        {
+            return Launch {
+                program: cand.into(),
+                prefix: vec![],
+                apium_home: None,
+                label: "全局",
+            };
+        }
     }
     Launch {
-        program: "npx".into(),
+        program: npx_program().into(),
         prefix: vec!["--yes".into(), "--prefer-offline".into(), APPIUM_NPX_SPEC.into()],
         apium_home: None,
         label: "npx",
@@ -140,18 +231,23 @@ async fn resolve_launch(config_dir: &std::path::Path) -> Launch {
 
 /// 确保 appium server 就绪并按需拉起。
 pub async fn ensure_appium(config_dir: &std::path::Path) -> AppResult<()> {
-    if appium_ready().await {
+    let (port, reused) = acquire_port().await;
+    APPIUM_PORT.store(port, Ordering::Relaxed);
+    if reused {
         return Ok(());
     }
     let launch = resolve_launch(config_dir).await;
-    eprintln!("[automate] appium 启动方式：{}", launch.label);
+    eprintln!("[automate] appium 启动方式：{}，端口 {port}", launch.label);
 
     // 内置方式驱动已随包预装，无需安装；全局/npx 需确保 uiautomator2 驱动存在。
     if launch.label != "内置" {
         if launch.label == "npx" {
-            // 触发 npx 拉取 appium（首联网，之后 --prefer-offline 走缓存）
-            let (code, log) =
-                run_cmd("npx", &["--yes", "--prefer-offline", APPIUM_NPX_SPEC, "--version"]).await?;
+            // 触发 npx 拉取 appium（首次联网，之后 --prefer-offline 走缓存）
+            let (code, log) = run_cmd(
+                &launch.program,
+                &["--yes", "--prefer-offline", APPIUM_NPX_SPEC, "--version"],
+            )
+            .await?;
             if code != 0 {
                 return Err(AppError::Config(format!("安装/检测 Appium 失败：{log}")));
             }
@@ -178,18 +274,31 @@ pub async fn ensure_appium(config_dir: &std::path::Path) -> AppResult<()> {
             .map(|c| c.try_wait().map(|s| s.is_none()).unwrap_or(false))
             == Some(true);
         if !alive {
+            // 上一轮的子进程若已退出，先收掉：既避免僵尸，也让它占的资源（含端口）释放。
+            // std::process::Child 不会在 drop 时杀进程，不显式 reap 就会残留。
+            if let Some(mut dead) = guard.take() {
+                let _ = dead.kill();
+                let _ = dead.wait();
+            }
             let (program, args) = launch.cmd(&[
                 "--port",
-                &APPIUM_PORT.to_string(),
+                &port.to_string(),
                 "--log-level",
                 "error",
             ]);
             let mut cb = std::process::Command::new(&program);
             cb.args(&args)
+                .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
             if let Some(home) = &launch.apium_home {
                 cb.env("APPIUM_HOME", home);
+            }
+            #[cfg(windows)]
+            {
+                // CREATE_NO_WINDOW：服务是后台常驻的，别在桌面上弹一扇 node 控制台
+                use std::os::windows::process::CommandExt;
+                cb.creation_flags(0x0800_0000);
             }
             let child = cb
                 .spawn()
@@ -200,14 +309,17 @@ pub async fn ensure_appium(config_dir: &std::path::Path) -> AppResult<()> {
     // 轮询健康检查（最多 ~60s，内置更快）
     let tries = if launch.label == "内置" { 60 } else { 120 };
     for _ in 0..tries {
-        if appium_ready().await {
+        if appium_ready_on(port).await {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    Err(AppError::Config(
-        "Appium 服务未能在规定时间内就绪，请确认设备已连接且 adb 可用".into(),
-    ))
+    // 失败原因是 Appium 运行时/端口，跟设备连接无关（会话还没建呢），文案别再指向设备。
+    Err(AppError::Config(format!(
+        "Appium 服务在端口 {port} 上未在 {}s 内就绪（启动方式：{}）。请确认内置运行时完整，或自行启动 Appium 后重试。",
+        tries / 2,
+        launch.label,
+    )))
 }
 
 // 小工具：以 Launch 的方式执行一条命令（带 APPIUM_HOME 环境）
@@ -673,7 +785,7 @@ pub async fn env_status(config_dir: &std::path::Path) -> Value {
     let launch = resolve_launch(config_dir).await;
     json!({
         "mode": launch.label,
-        "appiumReady": appium_ready().await,
+        "appiumReady": appium_ready_on(APPIUM_PORT.load(Ordering::Relaxed)).await,
     })
 }
 

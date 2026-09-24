@@ -34,7 +34,14 @@ jobs:
 
       - run: npm ci
 
+      # Windows 安装包必须自带 adb.exe 三件套：仓库里入库的是内置 mac 版 adb，
+      # 不拉取则终用户机器上没装 Android SDK 时完全无法连设备（脚本会顺手删掉 mac 版）。
+      - name: Fetch Windows adb (platform-tools)
+        if: runner.os == 'Windows'
+        run: bash scripts/fetch-adb-windows.sh
+
       # 生成内置离线 Appium 运行时（best-effort：失败也继续，运行时会回退全局/npx）
+      # Windows 上同样用 bash（Git Bash 自带），脚本按 uname 决定 bin/node.exe
       - name: Prepare offline Appium runtime
         continue-on-error: true
         run: bash scripts/bundle-appium.sh
