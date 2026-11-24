@@ -14,7 +14,21 @@ interface Props {
 }
 
 const TAP_THRESHOLD = 15;
-const MOVE_THROTTLE_MS = 30;
+const MOVE_THROTTLE_MS = 14;
+
+// ── 松手惯性策略 ──
+// 惯性本体交给设备端：motionevent 流式注入 / 注入桥 / scrcpy 通道都会把
+// 带真实时间戳的事件流交给系统，设备端 VelocityTracker 算出甩动速度后，
+// 由应用自身物理产生与真手指一致的惯性滚动（ClampingScrollPhysics 等）。
+// 客户端绝不能在松手前合成「指数衰减尾巴」——那会把事件流末段速度衰减到
+// 近 0 才抬起，反而掐灭设备端惯性。
+// 唯一需要补偿的是鼠标特有的「先停下再松开」：真手指几乎总是在移动中抬起，
+// 而鼠标经常停住后再松开按键，设备端速度估计会被停顿清零 → 滚动戛然而止。
+// 此时按停顿前的滑动速度补一小段冲刺再抬起，恢复自然惯性。
+const FLING_VELOCITY_THRESHOLD = 0.3;   // 流坐标 px/ms，低于此值视为普通拖拽结束
+const RESCUE_MAX_PAUSE_MS = 250;        // 停顿超过该值视为主动停住，不补惯性
+const RESCUE_STEPS = 5;                 // 补冲刺的 move 条数
+const RESCUE_STEP_MS = 14;              // 冲刺事件间隔（贴近设备端注入节奏）
 
 export function MirrorCanvas({ serial, stream, recorder }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -46,7 +60,45 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
     y: number;
     moved: boolean;
     lastMoveTs: number;
+    downTs: number;
+    samples: { t: number; x: number; y: number }[];
   } | null>(null);
+
+  /** 窗口内首末样本平均速度（流坐标 px/ms 向量）。样本不足时返回零向量。 */
+  const windowVelocity = (
+    samples: { t: number; x: number; y: number }[],
+    untilTs: number,
+    windowMs = 120,
+  ) => {
+    const recent = samples.filter((s) => s.t <= untilTs && untilTs - s.t <= windowMs);
+    if (recent.length < 2) return { vx: 0, vy: 0 };
+    const a = recent[0];
+    const b = recent[recent.length - 1];
+    const dt = b.t - a.t;
+    if (dt < 20) return { vx: 0, vy: 0 };
+    return { vx: (b.x - a.x) / dt, vy: (b.y - a.y) / dt };
+  };
+
+  /** 短暂停顿后松手的补偿冲刺：按停顿前速度继续滑动一小段再抬起。
+      不做代次中止——全程仅 ~70ms 且必以 up 收尾，新手势的 down 会在
+      通道中排队跟上，保证设备端触摸状态始终自洽（down↔up 成对）。 */
+  const sendRescueBurst = async (
+    serial_: string,
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+  ) => {
+    let px = x;
+    let py = y;
+    for (let i = 0; i < RESCUE_STEPS; i++) {
+      await new Promise((r) => setTimeout(r, RESCUE_STEP_MS));
+      px += vx * RESCUE_STEP_MS;
+      py += vy * RESCUE_STEP_MS;
+      void touch(serial_, "move", Math.round(px), Math.round(py));
+    }
+    void touch(serial_, "up", Math.round(px), Math.round(py));
+  };
 
   /** 客户端坐标 → 视频流坐标（0..流宽, 0..流高）。
       必须用流坐标系：scrcpy 服务器要求事件尺寸与视频尺寸一致，否则丢弃事件。 */
@@ -80,7 +132,11 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
     const pt = toDevice(e.clientX, e.clientY);
     if (!pt) return;
     (e.target as Element).setPointerCapture?.(e.pointerId);
-    gesture.current = { startX: pt[0], startY: pt[1], x: pt[0], y: pt[1], moved: false, lastMoveTs: 0 };
+    gesture.current = {
+      startX: pt[0], startY: pt[1],
+      x: pt[0], y: pt[1],
+      moved: false, lastMoveTs: 0, downTs: performance.now(), samples: [],
+    };
     void touch(serial, "down", pt[0], pt[1]);
   };
 
@@ -95,6 +151,8 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
     g.x = pt[0];
     g.y = pt[1];
     const now = performance.now();
+    g.samples.push({ t: now, x: pt[0], y: pt[1] });
+    while (g.samples.length > 24) g.samples.shift();
     if (g.moved && now - g.lastMoveTs >= MOVE_THROTTLE_MS) {
       g.lastMoveTs = now;
       void touch(serial, "move", pt[0], pt[1]);
@@ -107,14 +165,17 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
   };
 
   /** 指针释放/取消：必须补发 up，否则设备侧手指保持按下，后续所有触摸失效。
-      指针移出画面时 toDevice 返回 null，此时退回最后一次有效坐标。 */
+      指针移出画面时 toDevice 返回 null，此时退回最后一次有效坐标。
+      惯性由设备端根据事件流速度自行产生（见文件头「松手惯性策略」），
+      这里只处理鼠标「停下再松开」的补偿冲刺。 */
   const releasePointer = (e: React.PointerEvent) => {
     e.preventDefault();
     const g = gesture.current;
     gesture.current = null;
     if (!g || !stream.meta) return;
     const pt = toDevice(e.clientX, e.clientY) ?? [g.x, g.y];
-    void touch(serial, "up", pt[0], pt[1]);
+    const gestureMs = Math.max(80, Math.min(400, performance.now() - g.downTs));
+
     // 宏录制：聚合成 tap/swipe 记录
     if (g.moved) {
       recorder.push({
@@ -123,11 +184,39 @@ export function MirrorCanvas({ serial, stream, recorder }: Props) {
         y1: g.startY,
         x2: pt[0],
         y2: pt[1],
-        durationMs: Math.min(400, Math.max(100, performance.now() - e.timeStamp + 100)),
+        durationMs: gestureMs,
       });
     } else {
       recorder.push({ type: "tap", x: pt[0], y: pt[1] });
     }
+
+    if (!g.moved) {
+      void touch(serial, "up", pt[0], pt[1]);
+      return;
+    }
+
+    const last = g.samples.length ? g.samples[g.samples.length - 1] : null;
+    const sinceMove = last ? performance.now() - last.t : Infinity;
+
+    // 松手时鼠标仍在滑动（≤100ms 内有移动）：设备端已看到完整速度轨迹，
+    // 直接抬起即可获得原生惯性。
+    if (last && sinceMove <= 100) {
+      void touch(serial, "up", pt[0], pt[1]);
+      return;
+    }
+
+    // 短暂停顿（≤250ms）后松开：按停顿前的速度补冲刺，恢复设备端速度估计
+    if (last && sinceMove <= RESCUE_MAX_PAUSE_MS) {
+      const v = windowVelocity(g.samples, last.t);
+      const speed = Math.hypot(v.vx, v.vy);
+      if (speed >= FLING_VELOCITY_THRESHOLD) {
+        void sendRescueBurst(serial, pt[0], pt[1], v.vx, v.vy);
+        return;
+      }
+    }
+
+    // 慢速拖拽 / 长停顿：与真手指停住后抬起一致，直接抬起（无惯性）
+    void touch(serial, "up", pt[0], pt[1]);
   };
 
   const onWheel = (e: React.WheelEvent) => {

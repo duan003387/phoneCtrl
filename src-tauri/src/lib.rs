@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod error;
 mod macros;
+mod motion;
 mod state;
 mod stream;
 mod util;

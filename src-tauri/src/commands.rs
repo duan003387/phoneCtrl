@@ -236,6 +236,13 @@ pub async fn input_tap(state: State<'_, AppState>, serial: String, x: u32, y: u3
     if touch_via_socket(&state, &serial, &[(ACTION_DOWN, x, y), (ACTION_UP, x, y)]).await? {
         return Ok(());
     }
+    if let Some(ms) = state.motion.ensure(&state.adb, &serial).await {
+        let (dx, dy) = device_coords(&state, &serial, x, y).await;
+        if ms.send_seq(vec![(ACTION_DOWN, dx, dy), (ACTION_UP, dx, dy)]) {
+            return Ok(());
+        }
+        state.motion.stop(&serial);
+    }
     let (dx, dy) = device_coords(&state, &serial, x, y).await;
     state.input.tap(&state.adb, &serial, dx, dy).await
 }
@@ -269,6 +276,15 @@ pub async fn input_swipe(
     }
     let (dx1, dy1) = device_coords(&state, &serial, x1, y1).await;
     let (dx2, dy2) = device_coords(&state, &serial, x2, y2).await;
+    // motionevent 流式重放：按真实时长插值出连续轨迹，设备端据此算出
+    // 甩动速度 → 宏/脚本滑动也能产生与真手指一致的惯性（EMUI 的
+    // `input swipe` 实测不触发惯性）。
+    if let Some(ms) = state.motion.ensure(&state.adb, &serial).await {
+        if ms.send_seq(crate::motion::swipe_events(dx1, dy1, dx2, dy2, duration_ms)) {
+            return Ok(());
+        }
+        state.motion.stop(&serial);
+    }
     state
         .input
         .swipe(&state.adb, &serial, dx1, dy1, dx2, dy2, duration_ms)
@@ -356,6 +372,22 @@ pub async fn input_touch(
             };
             c.touch(action_id, x, y, sw, sh).await?;
             return Ok(());
+        }
+    }
+
+    // ── 通道 2.5：motionevent 流式注入（auto 模式实时通道）──
+    // 持久 adb shell 逐条 `input motionevent`：拖动实时跟随，事件自带真实
+    // 时间戳，设备端 VelocityTracker 可算出甩动速度 → 抬手后原生惯性滚动。
+    // （sendevent 桥在 SELinux 拒绝写 /dev/input 的机型上不可用，聚合通道
+    //   又只在抬手时重放固定时长 swipe —— EMUI 实测该重放不产生惯性。）
+    if !scrcpy_backend {
+        if let Some(ms) = state.motion.ensure(&state.adb, &serial).await {
+            let (dx, dy) = scale_to_device(h, x, y);
+            if ms.send(action_id, dx, dy) {
+                return Ok(());
+            }
+            // 通道失效（写入线程退出）→ 继续走下方 adb 聚合降级
+            state.motion.stop(&serial);
         }
     }
 

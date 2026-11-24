@@ -19,6 +19,8 @@ pub struct AppState {
     pub config_dir: PathBuf,
     /// 无控制通道时 input_touch 的起点记录（adb 回退聚合）
     pub touch_origins: Arc<Mutex<HashMap<String, (u32, u32)>>>,
+    /// motionevent 流式注入通道（持久 adb shell，实时拖拽 + 真实甩动速度）
+    pub motion: std::sync::Arc<crate::motion::MotionManager>,
 }
 
 impl AppState {
@@ -42,6 +44,7 @@ impl AppState {
             macros: Arc::new(Mutex::new(macros)),
             config_dir,
             touch_origins: Arc::new(Mutex::new(HashMap::new())),
+            motion: std::sync::Arc::new(crate::motion::MotionManager::default()),
         }
     }
 }
