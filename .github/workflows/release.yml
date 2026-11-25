@@ -7,6 +7,7 @@ on:
 
 jobs:
   # 用 tauri-action 跨平台构建、签名更新包并创建 GitHub Release（含 latest.json 更新清单）
+  # 注意：macos-14 镜像已被 GitHub 退役（报 configuration not supported），用 macos-15
   publish:
     permissions:
       contents: write
@@ -14,17 +15,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             args: "--target aarch64-apple-darwin"
-          - os: macos-14
+          - os: macos-15
             args: "--target x86_64-apple-darwin"
           - os: windows-latest
             args: ""
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -55,8 +56,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: ${{ matrix.args }}
-          release: true
-          # 上传更新产物并在 Release 里生成/合并 latest.json（供客户端 updater 拉取）
+          # 提供 tagName 即自动创建/复用同名 Release 并上传产物（新版
+          # tauri-action 已移除 `release` 输入，写了会报 Unexpected input）
           includeUpdaterJson: true
           tagName: v__VERSION__
           releaseName: "PhoneCtrl v__VERSION__"
